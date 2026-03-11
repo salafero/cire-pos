@@ -1,3 +1,391 @@
+import { useState, useEffect } from "react";
+import { createClient } from "@supabase/supabase-js";
+
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_KEY;
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// ─── AGENDA COMPONENT ─────────────────────────────────────────────────────────
+const TIPOS_SERVICIO = [
+  { id:"laser",       label:"Láser",           duracion:60,  color:"#2721E8" },
+  { id:"facial_baby", label:"Baby Clean",       duracion:60,  color:"#49B8D3" },
+  { id:"facial_full", label:"FullFace",         duracion:90,  color:"#49B8D3" },
+  { id:"corporal",    label:"Corporal/Moldeo",  duracion:60,  color:"#a855f7" },
+  { id:"hifu",        label:"HIFU 4D",          duracion:90,  color:"#f97316" },
+  { id:"post_op",     label:"Post operatorio",  duracion:60,  color:"#10b981" },
+];
+const HORARIOS = { 1:{abre:"10:00",cierra:"20:00"},2:{abre:"10:00",cierra:"20:00"},3:{abre:"10:00",cierra:"20:00"},4:{abre:"10:00",cierra:"20:00"},5:{abre:"10:00",cierra:"20:00"},6:{abre:"09:00",cierra:"16:00"},0:null };
+const DIAS_LABEL = ["Dom","Lun","Mar","Mié","Jue","Vie","Sáb"];
+
+function generarBloques(fecha, duracionMin) {
+  const dia = new Date(fecha+"T12:00:00").getDay();
+  const horario = HORARIOS[dia];
+  if (!horario) return [];
+  const bloques = [];
+  const [hA,mA] = horario.abre.split(":").map(Number);
+  const [hC,mC] = horario.cierra.split(":").map(Number);
+  let mins = hA*60+mA;
+  const fin = hC*60+mC;
+  while (mins+duracionMin<=fin) {
+    const h=Math.floor(mins/60),m=mins%60;
+    const hf=Math.floor((mins+duracionMin)/60),mf=(mins+duracionMin)%60;
+    bloques.push({ inicio:`${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}`, fin:`${String(hf).padStart(2,"0")}:${String(mf).padStart(2,"0")}` });
+    mins+=30;
+  }
+  return bloques;
+}
+function semanaDesde(fecha) {
+  const base=new Date(fecha+"T12:00:00"),dow=base.getDay();
+  const lunes=new Date(base);
+  lunes.setDate(base.getDate()-(dow===0?6:dow-1));
+  return Array.from({length:6},(_,i)=>{ const d=new Date(lunes); d.setDate(lunes.getDate()+i); return d.toISOString().slice(0,10); });
+}
+const hoy=()=>new Date().toISOString().slice(0,10);
+const labelFecha=(f)=>new Date(f+"T12:00:00").toLocaleDateString("es-MX",{weekday:"short",day:"numeric",month:"short"});
+const colorTipo=(tipo)=>TIPOS_SERVICIO.find(t=>t.id===tipo)?.color||"#2721E8";
+
+function Agenda({ session }) {
+  const [semana,setSemana]=useState(semanaDesde(hoy()));
+  const [citas,setCitas]=useState([]);
+  const [modal,setModal]=useState(false);
+  const [detalle,setDetalle]=useState(null);
+  const [busqueda,setBusqueda]=useState("");
+  const [clientasEncontradas,setClientasEncontradas]=useState([]);
+  const [clientaSel,setClientaSel]=useState(null);
+  const [paquetesSel,setPaquetesSel]=useState([]);
+  const [paqueteElegido,setPaqueteElegido]=useState(null);
+  const [tipoSvc,setTipoSvc]=useState(null);
+  const [fechaCita,setFechaCita]=useState(hoy());
+  const [bloqueSel,setBloqueSel]=useState(null);
+  const [bloques,setBloques]=useState([]);
+  const [notas,setNotas]=useState("");
+  const [esNueva,setEsNueva]=useState(true);
+  const [nombreNueva,setNombreNueva]=useState("");
+  const [telefonoNueva,setTelefonoNueva]=useState("");
+  const [saving,setSaving]=useState(false);
+  const [paso,setPaso]=useState(1);
+
+  const cargarCitas=async()=>{
+    const {data}=await supabase.from("citas").select("*").eq("sucursal_id",session.id).gte("fecha",semana[0]).lte("fecha",semana[semana.length-1]).order("hora_inicio");
+    if(data) setCitas(data);
+  };
+  useEffect(()=>{cargarCitas();},[semana,session]);
+  useEffect(()=>{ if(tipoSvc&&fechaCita){setBloques(generarBloques(fechaCita,tipoSvc.duracion));setBloqueSel(null);} },[tipoSvc,fechaCita]);
+
+  const buscarClientas=async(q)=>{
+    if(q.length<2){setClientasEncontradas([]);return;}
+    const {data}=await supabase.from("clientas").select("*").ilike("nombre",`%${q}%`).eq("sucursal_id",session.id).limit(5);
+    setClientasEncontradas(data||[]);
+  };
+  const seleccionarClientaExistente=async(c)=>{
+    setClientaSel(c);setClientasEncontradas([]);setBusqueda(c.nombre);setEsNueva(false);
+    const {data}=await supabase.from("paquetes").select("*").eq("clienta_id",c.id).eq("activo",true);
+    setPaquetesSel(data||[]);setPaqueteElegido(null);
+  };
+  const seleccionarPaquete=(p)=>{
+    setPaqueteElegido(p);
+    const n=p.servicio.toLowerCase();
+    let t=TIPOS_SERVICIO[0];
+    if(n.includes("baby")) t=TIPOS_SERVICIO[1];
+    else if(n.includes("fullface")||n.includes("facial")) t=TIPOS_SERVICIO[2];
+    else if(n.includes("hifu")) t=TIPOS_SERVICIO[4];
+    else if(n.includes("post")) t=TIPOS_SERVICIO[5];
+    else if(n.includes("moldeo")||n.includes("corporal")||n.includes("anticel")) t=TIPOS_SERVICIO[3];
+    setTipoSvc(t);
+  };
+  const esBloqueOcupado=(b)=>citas.filter(c=>c.fecha===fechaCita).some(c=>(b.inicio>=c.hora_inicio&&b.inicio<c.hora_fin)||(b.fin>c.hora_inicio&&b.fin<=c.hora_fin));
+
+  const guardarCita=async()=>{
+    if(!bloqueSel) return;
+    setSaving(true);
+    try {
+      let clientaId=clientaSel?.id,clientaNombre=clientaSel?.nombre;
+      if(esNueva&&!clientaSel){
+        const {data:newC}=await supabase.from("clientas").insert([{nombre:nombreNueva,telefono:telefonoNueva,sucursal_id:session.id,sucursal_nombre:session.nombre}]).select();
+        clientaId=newC[0].id;clientaNombre=newC[0].nombre;
+      }
+      const sesionNum=paqueteElegido?paqueteElegido.sesiones_usadas+1:1;
+      const esCobro=!paqueteElegido||paqueteElegido.sesiones_usadas===0;
+      await supabase.from("citas").insert([{clienta_id:clientaId,clienta_nombre:clientaNombre,paquete_id:paqueteElegido?.id||null,sucursal_id:session.id,sucursal_nombre:session.nombre,servicio:paqueteElegido?.servicio||tipoSvc.label,tipo_servicio:tipoSvc.id,duracion_min:tipoSvc.duracion,fecha:fechaCita,hora_inicio:bloqueSel.inicio,hora_fin:bloqueSel.fin,sesion_numero:sesionNum,es_cobro:esCobro,estado:"agendada",notas}]);
+      if(paqueteElegido){
+        const ns=paqueteElegido.sesiones_usadas+1;
+        await supabase.from("paquetes").update({sesiones_usadas:ns,activo:ns<paqueteElegido.total_sesiones}).eq("id",paqueteElegido.id);
+      }
+      resetModal();cargarCitas();
+    } catch(e){console.error(e);}
+    setSaving(false);
+  };
+
+  const marcarCompletada=async(id)=>{await supabase.from("citas").update({estado:"completada"}).eq("id",id);cargarCitas();};
+  const cancelarCita=async(id,paqId,sesUsadas)=>{
+    await supabase.from("citas").update({estado:"cancelada"}).eq("id",id);
+    if(paqId) await supabase.from("paquetes").update({sesiones_usadas:Math.max(0,sesUsadas-1),activo:true}).eq("id",paqId);
+    setDetalle(null);cargarCitas();
+  };
+  const resetModal=()=>{setModal(false);setPaso(1);setBusqueda("");setClientaSel(null);setClientasEncontradas([]);setPaquetesSel([]);setPaqueteElegido(null);setTipoSvc(null);setFechaCita(hoy());setBloqueSel(null);setBloques([]);setNotas("");setEsNueva(true);setNombreNueva("");setTelefonoNueva("");};
+  const semanaAnterior=()=>{const d=new Date(semana[0]+"T12:00:00");d.setDate(d.getDate()-7);setSemana(semanaDesde(d.toISOString().slice(0,10)));};
+  const semanaSiguiente=()=>{const d=new Date(semana[0]+"T12:00:00");d.setDate(d.getDate()+7);setSemana(semanaDesde(d.toISOString().slice(0,10)));};
+  const citasDelDia=(fecha)=>citas.filter(c=>c.fecha===fecha).sort((a,b)=>a.hora_inicio.localeCompare(b.hora_inicio));
+
+  return (
+    <div style={{padding:"20px 24px",overflowY:"auto",height:"calc(100vh - 64px)"}}>
+      <style>{`
+        .bloque-btn{padding:8px 6px;border-radius:8px;font-size:11px;font-weight:500;cursor:pointer;border:1px solid;transition:all 0.15s;text-align:center;}
+        .cita-card{border-radius:8px;padding:8px 10px;margin-bottom:4px;cursor:pointer;transition:opacity 0.15s;border-left:3px solid;}
+        .cita-card:hover{opacity:0.8;}
+        .clienta-sugg{padding:10px 14px;cursor:pointer;border-bottom:1px solid rgba(255,255,255,0.05);transition:background 0.15s;}
+        .clienta-sugg:hover{background:rgba(39,33,232,0.2);}
+        .paq-card{padding:12px;border-radius:10px;border:1px solid;cursor:pointer;transition:all 0.15s;margin-bottom:8px;}
+        .paq-card:hover{border-color:#2721E8;}
+        .tipo-btn{padding:10px 14px;border-radius:10px;border:1px solid;cursor:pointer;transition:all 0.15s;text-align:center;}
+        .paso-ind{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;}
+      `}</style>
+
+      {/* Header */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"16px"}}>
+        <div>
+          <div style={{fontSize:"11px",letterSpacing:"2px",color:"rgba(255,255,255,0.3)",marginBottom:"2px"}}>AGENDA SEMANAL</div>
+          <div style={{fontSize:"16px",fontWeight:600}}>{session.nombre}</div>
+        </div>
+        <div style={{display:"flex",gap:"8px",alignItems:"center"}}>
+          <button className="btn-ghost" onClick={semanaAnterior}>← Anterior</button>
+          <div style={{fontSize:"12px",color:"rgba(255,255,255,0.4)",padding:"0 6px"}}>{labelFecha(semana[0])} — {labelFecha(semana[5])}</div>
+          <button className="btn-ghost" onClick={semanaSiguiente}>Siguiente →</button>
+          <button className="btn-blue" onClick={()=>setModal(true)}>+ Nueva cita</button>
+        </div>
+      </div>
+
+      {/* Leyenda */}
+      <div style={{display:"flex",gap:"12px",marginBottom:"14px",flexWrap:"wrap"}}>
+        {TIPOS_SERVICIO.map(t=>(
+          <div key={t.id} style={{display:"flex",alignItems:"center",gap:"5px",fontSize:"10px",color:"rgba(255,255,255,0.35)"}}>
+            <div style={{width:"8px",height:"8px",borderRadius:"2px",background:t.color}}/>{t.label}
+          </div>
+        ))}
+        <div style={{display:"flex",alignItems:"center",gap:"5px",fontSize:"10px",color:"rgba(255,255,255,0.35)"}}>
+          <div style={{width:"8px",height:"8px",borderRadius:"2px",background:"#f0c040"}}/>💰 Con cobro
+        </div>
+      </div>
+
+      {/* Calendario */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:"8px"}}>
+        {semana.map(fecha=>{
+          const dow=new Date(fecha+"T12:00:00").getDay();
+          const abierto=HORARIOS[dow]!==null;
+          const esFecha=fecha===hoy();
+          const citasDia=citasDelDia(fecha);
+          return (
+            <div key={fecha} className="glass" style={{padding:"10px",minHeight:"200px",opacity:abierto?1:0.35,borderColor:esFecha?"rgba(39,33,232,0.6)":"rgba(255,255,255,0.08)"}}>
+              <div style={{marginBottom:"8px"}}>
+                <div style={{fontSize:"9px",color:"rgba(255,255,255,0.3)",letterSpacing:"1px"}}>{DIAS_LABEL[dow]}</div>
+                <div style={{fontSize:"15px",fontWeight:700,color:esFecha?"#49B8D3":"#fff"}}>{fecha.slice(8)}</div>
+                {!abierto&&<div style={{fontSize:"9px",color:"rgba(255,80,80,0.5)"}}>Cerrado</div>}
+                {abierto&&<div style={{fontSize:"8px",color:"rgba(255,255,255,0.2)"}}>{HORARIOS[dow].abre}–{HORARIOS[dow].cierra}</div>}
+              </div>
+              {citasDia.length===0&&abierto&&<div style={{fontSize:"10px",color:"rgba(255,255,255,0.12)",textAlign:"center",paddingTop:"16px"}}>Sin citas</div>}
+              {citasDia.map(c=>(
+                <div key={c.id} className="cita-card"
+                  style={{background:`${colorTipo(c.tipo_servicio)}15`,borderLeftColor:c.es_cobro?"#f0c040":colorTipo(c.tipo_servicio),opacity:c.estado==="cancelada"?0.35:1}}
+                  onClick={()=>setDetalle(c)}>
+                  <div style={{fontSize:"9px",color:"rgba(255,255,255,0.35)"}}>{c.hora_inicio}–{c.hora_fin}</div>
+                  <div style={{fontSize:"11px",fontWeight:600,lineHeight:1.2,marginTop:"1px"}}>{c.clienta_nombre}</div>
+                  <div style={{fontSize:"9px",color:colorTipo(c.tipo_servicio),marginTop:"1px"}}>{c.servicio}</div>
+                  <div style={{display:"flex",gap:"3px",marginTop:"3px",flexWrap:"wrap"}}>
+                    {c.es_cobro&&<span style={{fontSize:"8px",background:"rgba(240,192,64,0.2)",color:"#f0c040",padding:"1px 4px",borderRadius:"3px"}}>💰</span>}
+                    <span style={{fontSize:"8px",background:"rgba(255,255,255,0.06)",color:"rgba(255,255,255,0.35)",padding:"1px 4px",borderRadius:"3px"}}>S{c.sesion_numero}</span>
+                    {c.estado==="completada"&&<span style={{fontSize:"8px",background:"rgba(16,185,129,0.2)",color:"#10b981",padding:"1px 4px",borderRadius:"3px"}}>✓</span>}
+                    {c.estado==="cancelada"&&<span style={{fontSize:"8px",background:"rgba(255,80,80,0.2)",color:"#ff6b6b",padding:"1px 4px",borderRadius:"3px"}}>✗</span>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Modal detalle */}
+      {detalle&&(
+        <div className="overlay" onClick={()=>setDetalle(null)}>
+          <div className="glass" style={{width:360,padding:"26px",borderColor:`${colorTipo(detalle.tipo_servicio)}44`}} onClick={e=>e.stopPropagation()}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:"18px"}}>
+              <div>
+                <div style={{fontSize:"10px",letterSpacing:"2px",color:"rgba(255,255,255,0.3)",marginBottom:"3px"}}>CITA</div>
+                <div style={{fontSize:"17px",fontWeight:700}}>{detalle.clienta_nombre}</div>
+              </div>
+              <button onClick={()=>setDetalle(null)} style={{background:"none",border:"none",color:"rgba(255,255,255,0.4)",cursor:"pointer",fontSize:"20px"}}>×</button>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:"9px",background:"rgba(0,0,0,0.3)",borderRadius:"10px",padding:"13px",marginBottom:"16px"}}>
+              {[["Servicio",detalle.servicio],["Fecha",new Date(detalle.fecha+"T12:00:00").toLocaleDateString("es-MX",{weekday:"long",day:"numeric",month:"long"})],["Horario",`${detalle.hora_inicio} – ${detalle.hora_fin}`],["Sesión",`${detalle.sesion_numero} de 8`]].map(([l,v])=>(
+                <div key={l} style={{display:"flex",justifyContent:"space-between",fontSize:"13px"}}>
+                  <span style={{color:"rgba(255,255,255,0.4)"}}>{l}</span><span style={{fontWeight:500}}>{v}</span>
+                </div>
+              ))}
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:"13px"}}>
+                <span style={{color:"rgba(255,255,255,0.4)"}}>Tipo</span>
+                <span style={{background:detalle.es_cobro?"rgba(240,192,64,0.2)":"rgba(16,185,129,0.15)",color:detalle.es_cobro?"#f0c040":"#10b981",padding:"2px 10px",borderRadius:"6px",fontSize:"11px",fontWeight:600}}>
+                  {detalle.es_cobro?"💰 Con cobro":"✓ Seguimiento"}
+                </span>
+              </div>
+              {detalle.notas&&<div style={{fontSize:"11px",color:"rgba(255,255,255,0.3)",borderTop:"1px solid rgba(255,255,255,0.06)",paddingTop:"8px"}}>{detalle.notas}</div>}
+            </div>
+            {detalle.estado==="agendada"&&(
+              <div style={{display:"flex",gap:"8px"}}>
+                <button className="btn-ghost" style={{flex:1,color:"#ff6b6b",borderColor:"rgba(255,80,80,0.3)"}} onClick={()=>cancelarCita(detalle.id,detalle.paquete_id,detalle.sesion_numero)}>Cancelar</button>
+                <button className="btn-blue" style={{flex:2}} onClick={()=>{marcarCompletada(detalle.id);setDetalle(null);}}>✓ Completada</button>
+              </div>
+            )}
+            {detalle.estado!=="agendada"&&<div style={{textAlign:"center",fontSize:"13px",color:"rgba(255,255,255,0.3)"}}>Cita {detalle.estado}</div>}
+          </div>
+        </div>
+      )}
+
+      {/* Modal nueva cita */}
+      {modal&&(
+        <div className="overlay">
+          <div className="glass" style={{width:500,maxHeight:"88vh",overflow:"auto",padding:"26px"}}>
+            <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"22px"}}>
+              {[{n:1,l:"Clienta"},{n:2,l:"Servicio"},{n:3,l:"Horario"}].map((p,i)=>(
+                <div key={p.n} style={{display:"flex",alignItems:"center",gap:"8px",flex:i<2?1:"auto"}}>
+                  <div className="paso-ind" style={{background:paso>=p.n?"#2721E8":"rgba(255,255,255,0.06)",color:paso>=p.n?"#fff":"rgba(255,255,255,0.3)",flexShrink:0}}>{p.n}</div>
+                  <div style={{fontSize:"12px",color:paso===p.n?"#fff":"rgba(255,255,255,0.3)",fontWeight:paso===p.n?600:400}}>{p.l}</div>
+                  {i<2&&<div style={{flex:1,height:"1px",background:"rgba(255,255,255,0.06)"}}/>}
+                </div>
+              ))}
+              <button onClick={resetModal} style={{background:"none",border:"none",color:"rgba(255,255,255,0.4)",cursor:"pointer",fontSize:"20px",marginLeft:"auto"}}>×</button>
+            </div>
+
+            {/* Paso 1 */}
+            {paso===1&&(
+              <div>
+                <div style={{fontSize:"14px",fontWeight:600,marginBottom:"14px"}}>¿Quién viene?</div>
+                <div style={{display:"flex",gap:"8px",marginBottom:"14px"}}>
+                  <button className="btn-ghost" style={{flex:1,borderColor:!esNueva?"#2721E8":"rgba(255,255,255,0.1)",color:!esNueva?"#fff":"rgba(255,255,255,0.4)"}} onClick={()=>setEsNueva(false)}>Clienta existente</button>
+                  <button className="btn-ghost" style={{flex:1,borderColor:esNueva?"#2721E8":"rgba(255,255,255,0.1)",color:esNueva?"#fff":"rgba(255,255,255,0.4)"}} onClick={()=>{setEsNueva(true);setClientaSel(null);setBusqueda("");}}>Nueva clienta</button>
+                </div>
+                {!esNueva?(
+                  <div style={{position:"relative"}}>
+                    <input className="inp" placeholder="Buscar por nombre..." value={busqueda} onChange={e=>{setBusqueda(e.target.value);buscarClientas(e.target.value);setClientaSel(null);}}/>
+                    {clientasEncontradas.length>0&&(
+                      <div style={{position:"absolute",top:"100%",left:0,right:0,background:"#1a1b2e",border:"1px solid rgba(255,255,255,0.1)",borderRadius:"10px",zIndex:10,overflow:"hidden",marginTop:"4px"}}>
+                        {clientasEncontradas.map(c=>(
+                          <div key={c.id} className="clienta-sugg" onClick={()=>seleccionarClientaExistente(c)}>
+                            <div style={{fontSize:"13px",fontWeight:500}}>{c.nombre}</div>
+                            <div style={{fontSize:"11px",color:"rgba(255,255,255,0.3)"}}>{c.telefono}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {clientaSel&&(
+                      <div style={{marginTop:"10px",padding:"12px",background:"rgba(39,33,232,0.08)",border:"1px solid rgba(39,33,232,0.25)",borderRadius:"10px"}}>
+                        <div style={{fontSize:"13px",fontWeight:600,marginBottom:"8px"}}>✓ {clientaSel.nombre}</div>
+                        {paquetesSel.length>0?(
+                          <div>
+                            <div style={{fontSize:"10px",color:"rgba(255,255,255,0.4)",marginBottom:"8px",letterSpacing:"1px"}}>PAQUETES ACTIVOS</div>
+                            {paquetesSel.map(p=>(
+                              <div key={p.id} className="paq-card"
+                                style={{borderColor:paqueteElegido?.id===p.id?"#49B8D3":"rgba(255,255,255,0.08)",background:paqueteElegido?.id===p.id?"rgba(73,184,211,0.08)":"rgba(0,0,0,0.2)"}}
+                                onClick={()=>seleccionarPaquete(p)}>
+                                <div style={{fontSize:"12px",fontWeight:600}}>{p.servicio}</div>
+                                <div style={{fontSize:"10px",color:"rgba(255,255,255,0.4)",marginTop:"2px"}}>Sesión {p.sesiones_usadas+1} de {p.total_sesiones}</div>
+                                <div style={{margin:"6px 0 3px",height:"3px",background:"rgba(255,255,255,0.06)",borderRadius:"2px"}}>
+                                  <div style={{width:`${(p.sesiones_usadas/p.total_sesiones)*100}%`,height:"100%",background:"#49B8D3",borderRadius:"2px"}}/>
+                                </div>
+                                {paqueteElegido?.id===p.id&&<div style={{fontSize:"10px",color:p.sesiones_usadas===0?"#f0c040":"#10b981",fontWeight:600,marginTop:"4px"}}>
+                                  {p.sesiones_usadas===0?"💰 Primera sesión — se cobra":"✓ Seguimiento — ya pagó"}
+                                </div>}
+                              </div>
+                            ))}
+                          </div>
+                        ):(
+                          <div style={{fontSize:"11px",color:"#f0c040"}}>⚠ Sin paquetes activos — se registra como nueva compra</div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ):(
+                  <div style={{display:"flex",flexDirection:"column",gap:"9px"}}>
+                    <input className="inp" placeholder="Nombre completo *" value={nombreNueva} onChange={e=>setNombreNueva(e.target.value)}/>
+                    <input className="inp" placeholder="Teléfono (opcional)" value={telefonoNueva} onChange={e=>setTelefonoNueva(e.target.value)}/>
+                    <div style={{fontSize:"11px",color:"#f0c040",padding:"10px",background:"rgba(240,192,64,0.06)",borderRadius:"8px",border:"1px solid rgba(240,192,64,0.15)"}}>
+                      💰 Nueva clienta — cerrar ticket en POS al terminar la cita
+                    </div>
+                  </div>
+                )}
+                <button className="btn-blue" style={{width:"100%",marginTop:"18px",padding:"12px"}} disabled={esNueva?!nombreNueva:!clientaSel} onClick={()=>setPaso(2)}>Continuar →</button>
+              </div>
+            )}
+
+            {/* Paso 2 */}
+            {paso===2&&(
+              <div>
+                <div style={{fontSize:"14px",fontWeight:600,marginBottom:"4px"}}>Tipo de servicio</div>
+                <div style={{fontSize:"11px",color:"rgba(255,255,255,0.4)",marginBottom:"14px"}}>{paqueteElegido?`Paquete: ${paqueteElegido.servicio}`:"Nueva clienta"}</div>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:"8px",marginBottom:"16px"}}>
+                  {TIPOS_SERVICIO.map(t=>(
+                    <div key={t.id} className="tipo-btn"
+                      style={{borderColor:tipoSvc?.id===t.id?t.color:"rgba(255,255,255,0.08)",background:tipoSvc?.id===t.id?`${t.color}15`:"rgba(0,0,0,0.2)"}}
+                      onClick={()=>setTipoSvc(t)}>
+                      <div style={{fontSize:"13px",fontWeight:600,color:tipoSvc?.id===t.id?t.color:"#fff"}}>{t.label}</div>
+                      <div style={{fontSize:"10px",color:"rgba(255,255,255,0.3)",marginTop:"2px"}}>{t.duracion} min</div>
+                    </div>
+                  ))}
+                </div>
+                <textarea className="inp" rows={2} placeholder="Notas (zona específica, alergias...)" value={notas} onChange={e=>setNotas(e.target.value)} style={{resize:"none",marginBottom:"14px"}}/>
+                <div style={{display:"flex",gap:"8px"}}>
+                  <button className="btn-ghost" style={{flex:1}} onClick={()=>setPaso(1)}>← Atrás</button>
+                  <button className="btn-blue" style={{flex:2,padding:"12px"}} disabled={!tipoSvc} onClick={()=>setPaso(3)}>Continuar →</button>
+                </div>
+              </div>
+            )}
+
+            {/* Paso 3 */}
+            {paso===3&&(
+              <div>
+                <div style={{fontSize:"14px",fontWeight:600,marginBottom:"14px"}}>Fecha y hora</div>
+                <input type="date" className="inp" value={fechaCita} min={hoy()} onChange={e=>setFechaCita(e.target.value)} style={{colorScheme:"dark",marginBottom:"14px"}}/>
+                {new Date(fechaCita+"T12:00:00").getDay()===0&&<div style={{fontSize:"12px",color:"#ff6b6b",marginBottom:"10px"}}>⚠ Domingo — sucursal cerrada</div>}
+                {bloques.length>0&&(
+                  <div>
+                    <div style={{fontSize:"10px",color:"rgba(255,255,255,0.3)",marginBottom:"8px",letterSpacing:"1px"}}>HORARIOS · {tipoSvc?.duracion} min</div>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:"6px",maxHeight:"190px",overflowY:"auto",paddingRight:"4px",marginBottom:"14px"}}>
+                      {bloques.map(b=>{
+                        const ocupado=esBloqueOcupado(b);
+                        const selec=bloqueSel?.inicio===b.inicio;
+                        return (
+                          <div key={b.inicio} className="bloque-btn"
+                            style={{borderColor:ocupado?"rgba(255,80,80,0.25)":selec?"#2721E8":"rgba(255,255,255,0.08)",background:ocupado?"rgba(255,80,80,0.04)":selec?"rgba(39,33,232,0.2)":"rgba(0,0,0,0.2)",color:ocupado?"rgba(255,80,80,0.4)":selec?"#fff":"rgba(255,255,255,0.5)",cursor:ocupado?"not-allowed":"pointer"}}
+                            onClick={()=>!ocupado&&setBloqueSel(b)}>
+                            <div style={{fontSize:"12px",fontWeight:selec?700:400}}>{b.inicio}</div>
+                            {ocupado&&<div style={{fontSize:"8px",marginTop:"1px",color:"rgba(255,80,80,0.4)"}}>Ocupado</div>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+                {bloqueSel&&(
+                  <div style={{padding:"12px",background:"rgba(39,33,232,0.1)",border:"1px solid rgba(39,33,232,0.3)",borderRadius:"10px",marginBottom:"14px"}}>
+                    <div style={{fontSize:"13px",fontWeight:600}}>{new Date(fechaCita+"T12:00:00").toLocaleDateString("es-MX",{weekday:"long",day:"numeric",month:"long"})}</div>
+                    <div style={{fontSize:"16px",fontWeight:700,color:"#49B8D3",marginTop:"2px"}}>{bloqueSel.inicio} – {bloqueSel.fin}</div>
+                    <div style={{fontSize:"11px",marginTop:"6px",fontWeight:600,color:(!paqueteElegido||paqueteElegido.sesiones_usadas===0)?"#f0c040":"#10b981"}}>
+                      {(!paqueteElegido||paqueteElegido.sesiones_usadas===0)?"💰 Se cobrará — cerrar ticket en POS":"✓ Seguimiento — no se cobra"}
+                    </div>
+                  </div>
+                )}
+                <div style={{display:"flex",gap:"8px"}}>
+                  <button className="btn-ghost" style={{flex:1}} onClick={()=>setPaso(2)}>← Atrás</button>
+                  <button className="btn-blue" style={{flex:2,padding:"12px"}} disabled={!bloqueSel||saving} onClick={guardarCita}>
+                    {saving?"Guardando...":"✓ Confirmar cita"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 import { useState, useEffect } from "react";
 import { createClient } from "@supabase/supabase-js";
@@ -233,9 +621,9 @@ export default function CirePOS() {
             <span style={{ fontSize:"14px", fontWeight:500 }}>{session.nombre}</span>
           </div>
           <div style={{ display:"flex" }}>
-            {["pos","historial"].map((v) => (
+            {["pos","agenda","historial"].map((v) => (
               <div key={v} className={`nav-tab ${view===v?"active":""}`} onClick={() => { setView(v); if(v==="historial") cargarTickets(session.id); }}>
-                {v==="pos" ? "Punto de Venta" : "Historial de Hoy"}
+                {v==="pos" ? "Punto de Venta" : v==="agenda" ? "📅 Agenda" : "Historial de Hoy"}
               </div>
             ))}
           </div>
@@ -263,6 +651,7 @@ export default function CirePOS() {
         </div>
       )}
 
+      {view === "agenda" && <Agenda session={session} />}
       {view === "pos" ? (
         <div style={{ display:"grid", gridTemplateColumns:"1fr 360px", flex:1, overflow:"hidden", height:"calc(100vh - 64px)" }}>
 
